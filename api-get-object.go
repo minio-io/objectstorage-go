@@ -84,7 +84,9 @@ func (c *Client) GetObject(ctx context.Context, bucketName, objectName string, o
 						// Range is set with respect to the offset and length of the buffer requested.
 						// Do not set objectInfo from the first readAt request because it will not get
 						// the whole object.
-						opts.SetRange(req.Offset, req.Offset+int64(len(req.Buffer))-1)
+						rangeStart := req.Offset
+						rangeEnd := req.Offset + int64(len(req.Buffer)) - 1
+						opts.SetRange(rangeStart, rangeEnd)
 					} else if req.Offset > 0 {
 						opts.SetRange(req.Offset, 0)
 					}
@@ -129,19 +131,39 @@ func (c *Client) GetObject(ctx context.Context, bucketName, objectName string, o
 					// Only need to run a StatObject until an actual Read or ReadAt request comes through.
 
 					// Remove range header if already set, for stat Operations to get original file size.
-					delete(opts.headers, "Range")
-					objectInfo, err = c.StatObject(gctx, bucketName, objectName, StatObjectOptions(opts))
-					if err != nil {
-						resCh <- getResponse{
-							Error: err,
+					_, rangeHeaderPresent := opts.headers["Range"]
+					if rangeHeaderPresent {
+						objectInfo, err = c.StatObject(gctx, bucketName, objectName, StatObjectOptions(opts))
+
+						if err != nil {
+							resCh <- getResponse{
+								Error: err,
+							}
+							// Exit the go-routine.
+							return
 						}
-						// Exit the go-routine.
-						return
-					}
-					etag = objectInfo.ETag
-					// Send back the first response.
-					resCh <- getResponse{
-						objectInfo: objectInfo,
+						etag = objectInfo.ETag
+						// Send back the first response.
+						resCh <- getResponse{
+							objectInfo: objectInfo,
+						}
+					} else {
+						// The range header is not present, continue with the existing objectInfo.
+						delete(opts.headers, "Range")
+						objectInfo, err = c.StatObject(gctx, bucketName, objectName, StatObjectOptions(opts))
+
+						if err != nil {
+							resCh <- getResponse{
+								Error: err,
+							}
+							// Exit the go-routine.
+							return
+						}
+						etag = objectInfo.ETag
+						// Send back the first response.
+						resCh <- getResponse{
+							objectInfo: objectInfo,
+						}
 					}
 				}
 			} else if req.settingObjectInfo { // Request is just to get objectInfo.
@@ -415,7 +437,6 @@ func (o *Object) Stat() (ObjectInfo, error) {
 	if o.prevErr != nil && o.prevErr != io.EOF || o.isClosed {
 		return ObjectInfo{}, o.prevErr
 	}
-
 	// This is the first request.
 	if !o.isStarted || !o.objectInfoSet {
 		// Send the request and get the response.
